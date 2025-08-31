@@ -1,0 +1,145 @@
+-- MEETBOARD APP TABLES FOR PRODAI DATABASE
+-- This adds the meeting app functionality to the existing Prodai database
+-- All tables will use the existing profiles table for user authentication
+
+-- Meeting Rooms Table
+-- Stores information about each meeting room.
+CREATE TABLE IF NOT EXISTS meetboard_rooms (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL,
+    creator_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+    host_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+    password_hash VARCHAR(255),
+    status VARCHAR(20) DEFAULT 'active' NOT NULL CHECK (status IN ('scheduled', 'active', 'ended')),
+    start_time TIMESTAMPTZ,
+    end_time TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Meeting Participants Table
+-- A join table to track which users are in which rooms and their media state.
+CREATE TABLE IF NOT EXISTS meetboard_participants (
+    id BIGSERIAL PRIMARY KEY,
+    user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+    room_id UUID REFERENCES meetboard_rooms(id) ON DELETE CASCADE,
+    joined_at TIMESTAMPTZ DEFAULT NOW(),
+    role VARCHAR(20) DEFAULT 'participant' NOT NULL CHECK (role IN ('host', 'presenter', 'participant')),
+    status VARCHAR(20) DEFAULT 'pending' NOT NULL CHECK (status IN ('pending', 'admitted', 'denied', 'removed')),
+    is_muted BOOLEAN DEFAULT false NOT NULL,
+    is_video_on BOOLEAN DEFAULT false NOT NULL,
+    is_sharing_screen BOOLEAN DEFAULT false NOT NULL,
+    UNIQUE(user_id, room_id)
+);
+
+-- Meeting Messages Table
+-- Stores chat messages for each room.
+CREATE TABLE IF NOT EXISTS meetboard_messages (
+    id BIGSERIAL PRIMARY KEY,
+    room_id UUID REFERENCES meetboard_rooms(id) ON DELETE CASCADE NOT NULL,
+    user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Meeting Whiteboard Events Table
+-- Stores all actions performed on the whiteboard for persistence and real-time sync.
+CREATE TABLE IF NOT EXISTS meetboard_whiteboard_events (
+    id BIGSERIAL PRIMARY KEY,
+    room_id UUID REFERENCES meetboard_rooms(id) ON DELETE CASCADE NOT NULL,
+    user_id UUID REFERENCES profiles(id) ON DELETE CASCADE,
+    event_type VARCHAR(50) NOT NULL,
+    data JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Enable Realtime for meetboard tables
+alter table meetboard_participants replica identity full;
+alter table meetboard_messages replica identity full;
+alter table meetboard_whiteboard_events replica identity full;
+
+-- Add meetboard tables to realtime publication
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'meetboard_participants'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE meetboard_participants;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'meetboard_messages'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE meetboard_messages;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'meetboard_whiteboard_events'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE meetboard_whiteboard_events;
+  END IF;
+END $$;
+
+-- Enable RLS for meetboard tables
+ALTER TABLE meetboard_rooms ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meetboard_participants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meetboard_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE meetboard_whiteboard_events ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies for Meetboard (authenticated users only)
+
+-- Rooms: Authenticated users can create and view rooms
+DROP POLICY IF EXISTS "Authenticated users can manage meetboard rooms" ON meetboard_rooms;
+CREATE POLICY "Authenticated users can manage meetboard rooms" ON meetboard_rooms
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- Participants: Authenticated users can manage participants in rooms they're part of
+DROP POLICY IF EXISTS "Authenticated users can manage meetboard participants" ON meetboard_participants;
+CREATE POLICY "Authenticated users can manage meetboard participants" ON meetboard_participants
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- Messages: Authenticated users can manage messages in rooms they're part of
+DROP POLICY IF EXISTS "Authenticated users can manage meetboard messages" ON meetboard_messages;
+CREATE POLICY "Authenticated users can manage meetboard messages" ON meetboard_messages
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- Whiteboard Events: Authenticated users can manage whiteboard events in rooms they're part of
+DROP POLICY IF EXISTS "Authenticated users can manage meetboard whiteboard events" ON meetboard_whiteboard_events;
+CREATE POLICY "Authenticated users can manage meetboard whiteboard events" ON meetboard_whiteboard_events
+  FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- Meetboard Image Storage Bucket
+-- Stores images uploaded to the whiteboard. Publicly readable for easy access.
+insert into storage.buckets (id, name, public)
+values ('meetboard_images', 'meetboard_images', true)
+on conflict (id) do nothing;
+
+-- Policies for Meetboard Image Storage
+drop policy if exists "Authenticated users can upload images." on storage.objects;
+create policy "Authenticated users can upload images."
+  on storage.objects for insert to authenticated
+  with check ( bucket_id = 'meetboard_images' );
+  
+drop policy if exists "Anyone can view images." on storage.objects;
+create policy "Anyone can view images."
+  on storage.objects for select
+  using ( bucket_id = 'meetboard_images' );
+
+drop policy if exists "Authenticated users can manage their own images." on storage.objects;
+create policy "Authenticated users can manage their own images."
+    on storage.objects for update using (auth.uid() = owner and bucket_id = 'meetboard_images');
+
+drop policy if exists "Authenticated users can delete their own images." on storage.objects;
+create policy "Authenticated users can delete their own images."
+    on storage.objects for delete using (auth.uid() = owner and bucket_id = 'meetboard_images');

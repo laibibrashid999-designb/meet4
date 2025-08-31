@@ -1,0 +1,8 @@
+{
+  "name": "Copy of Meetboard by Prodai",
+  "description": "A real-time collaborative meeting application featuring a shared sketchboard with shape tools, video/text chat with a 5-user limit, and interactive tools. Built with React, TypeScript, and Tailwind CSS, it allows users to brainstorm, draw, and communicate seamlessly in virtual rooms.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

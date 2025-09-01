@@ -53,6 +53,23 @@ const getPeerConnectionConfig = async (): Promise<RTCConfiguration> => {
 };
 
 export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId }) => {
+  useEffect(() => {
+    if (!currentUser) return;
+    const currentPeerIds = new Set(participants.map(p => p.id));
+    peerConnections.current.forEach((pc, peerId) => {
+      if (!currentPeerIds.has(peerId) && peerId !== currentUser.id) {
+        console.log(`[WebRTC] Cleaning up connection for removed participant ${peerId}`);
+        pc.close();
+        peerConnections.current.delete(peerId);
+        setPeerStreams(prev => {
+          const newMap = new Map(prev);
+          newMap.delete(peerId);
+          return newMap;
+        });
+      }
+    });
+  }, [participants, currentUser?.id]);
+
   const { state } = useContext(RoomContext);
   const { currentUser, participants } = state;
   

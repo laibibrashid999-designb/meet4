@@ -312,6 +312,12 @@ export const RoomProvider: React.FC<RoomProviderProps> = ({ children, roomId }) 
               const oldParticipantData = payload.old as { user_id: string };
               if (oldParticipantData?.user_id) {
                  dispatch({ type: 'REMOVE_PARTICIPANT', payload: { userId: oldParticipantData.user_id } });
+                 const userId = oldParticipantData.user_id;
+                 const leavingUser = stateRef.current.participants.find(p => p.id === userId);
+                 if (leavingUser) {
+                   const messageContent = `${leavingUser.name} has left the room.`;
+                   await supabase.from('meetboard_messages').insert({ room_id: roomId, user_id: null, content: messageContent });
+                 }
               }
               break;
             }
@@ -325,8 +331,15 @@ export const RoomProvider: React.FC<RoomProviderProps> = ({ children, roomId }) 
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'meetboard_messages', filter: `room_id=eq.${roomId}` }, async (payload) => {
           if (!mounted || payload.new.user_id === stateRef.current.currentUser?.id || stateRef.current.isExiting) return;
           console.log('[RoomProvider] New message from:', payload.new.user_id);
-          const { data: user } = await supabase.from('profiles').select('full_name, avatar_url').eq('id', payload.new.user_id).single();
-          dispatch({ type: 'SEND_MESSAGE', payload: { id: payload.new.id.toString(), userId: payload.new.user_id, userName: user?.full_name || 'Unknown', avatarUrl: user?.avatar_url, content: payload.new.content, timestamp: payload.new.created_at } });
+          let userName = 'System';
+          let avatarUrl = undefined;
+          let userId = payload.new.user_id || 'system';
+          if (payload.new.user_id) {
+            const { data: user } = await supabase.from('profiles').select('full_name, avatar_url').eq('id', payload.new.user_id).single();
+            userName = user?.full_name || 'Unknown';
+            avatarUrl = user?.avatar_url;
+          }
+          dispatch({ type: 'SEND_MESSAGE', payload: { id: payload.new.id.toString(), userId, userName, avatarUrl, content: payload.new.content, timestamp: payload.new.created_at } });
         })
         .subscribe(async (status) => {
           if (status !== 'SUBSCRIBED' || !mounted) {
@@ -429,11 +442,15 @@ export const RoomProvider: React.FC<RoomProviderProps> = ({ children, roomId }) 
 
           if (messagesRes.data) {
             messagesRes.data.forEach(msg => {
-              // FIX: Map from 'msg.profiles' to get the joined user data correctly.
-              const userProfile = (msg.profiles && (Array.isArray(msg.profiles) ? msg.profiles[0] : msg.profiles)) as { full_name: string, avatar_url?: string } | null;
-              const userName = userProfile?.full_name || 'Unknown';
-              const avatarUrl = userProfile?.avatar_url;
-              dispatch({ type: 'SEND_MESSAGE', payload: { id: msg.id.toString(), userId: msg.user_id, userName, avatarUrl, content: msg.content, timestamp: msg.created_at } });
+              let userName = 'System';
+              let avatarUrl = undefined;
+              let userId = msg.user_id || 'system';
+              if (msg.user_id) {
+                const userProfile = (msg.profiles && (Array.isArray(msg.profiles) ? msg.profiles[0] : msg.profiles)) as { full_name: string, avatar_url?: string } | null;
+                userName = userProfile?.full_name || 'Unknown';
+                avatarUrl = userProfile?.avatar_url;
+              }
+              dispatch({ type: 'SEND_MESSAGE', payload: { id: msg.id.toString(), userId, userName, avatarUrl, content: msg.content, timestamp: msg.created_at } });
             });
           }
 

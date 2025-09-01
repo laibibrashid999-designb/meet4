@@ -6,25 +6,146 @@ import { motion } from 'framer-motion';
 import { getCurrentUser, signOut } from '../lib/user';
 import { LogOut, User } from 'lucide-react';
 import { useEffect } from 'react';
+import { supabase } from '../lib/supabase';
 
 const HomePage: React.FC = () => {
   const [roomId, setRoomId] = useState('');
   const [currentUser, setCurrentUser] = useState<any>(null);
+  const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
-    getCurrentUser().then(setCurrentUser);
+    const initUser = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      console.log('[HomePage] Session:', session);
+
+      if (session) {
+        const user = await getCurrentUser();
+        console.log('[HomePage] Current user loaded:', user);
+        setCurrentUser(user);
+      } else {
+        console.log('[HomePage] No active session');
+        setCurrentUser(null);
+      }
+    };
+
+    initUser();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log('[HomePage] Auth state changed:', event, session);
+      if (session) {
+        const user = await getCurrentUser();
+        setCurrentUser(user);
+      } else {
+        setCurrentUser(null);
+      }
+    });
+
+    return () => {
+      authListener?.subscription.unsubscribe();
+    };
   }, []);
 
-  const handleCreateRoom = () => {
-    const newRoomId = uuidv4();
-    navigate(`/room/${newRoomId}`);
+  const handleCreateRoom = async () => {
+    setError('');
+    setIsLoading(true);
+    
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      console.error('[HomePage] No active session found');
+      setError('Please sign in to create a room.');
+      setIsLoading(false);
+      return;
+    }
+
+    if (!currentUser) {
+      console.error('[HomePage] No current user found:', currentUser);
+      setError('Please sign in to create a room.');
+      setIsLoading(false);
+      return;
+    }
+
+    // Verify user has permission to create rooms
+    const { data: testRoom, error: testError } = await supabase
+      .from('meetboard_rooms')
+      .select()
+      .limit(1);
+
+    if (testError?.code === 'PGRST301') {
+      console.error('[HomePage] Permission error:', testError);
+      setError('You do not have permission to create rooms.');
+      setIsLoading(false);
+      return;
+    }
+
+    console.log('[HomePage] Creating room with user:', currentUser);
+    try {
+      const newRoomId = uuidv4();
+      const { data, error } = await supabase
+        .from('meetboard_rooms')
+        .insert([{ 
+          id: newRoomId, 
+          status: 'active',
+          creator_id: currentUser.id,
+          host_id: currentUser.id,
+          name: `${currentUser.name}'s Room`
+        }])
+        .select()
+        .single();
+
+      console.log('[HomePage] Room creation response:', { data, error });
+
+      if (error) {
+        console.error('[HomePage] Error creating room:', error);
+        setError('Failed to create room. Please try again.');
+        return;
+      }
+
+      navigate(`/room/${newRoomId}`);
+    } catch (err) {
+      console.error('[HomePage] Failed to create room:', err);
+      setError('Failed to create room. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const handleJoinRoom = (e: React.FormEvent) => {
+  const handleJoinRoom = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (roomId.trim()) {
-      navigate(`/room/${roomId.trim()}`);
+    const trimmedRoomId = roomId.trim();
+    if (!trimmedRoomId) {
+      setError('Please enter a room ID');
+      return;
+    }
+
+    setError('');
+    setIsLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('meetboard_rooms')
+        .select('status')
+        .eq('id', trimmedRoomId)
+        .single();
+
+      if (error || !data) {
+        console.error('[HomePage] Room not found:', error);
+        setError('Room not found. Please check the room ID.');
+        return;
+      }
+
+      if (data.status !== 'active') {
+        console.error('[HomePage] Room is not active:', data.status);
+        setError('This room is no longer active.');
+        return;
+      }
+
+      navigate(`/room/${trimmedRoomId}`);
+    } catch (err) {
+      console.error('[HomePage] Failed to join room:', err);
+      setError('Failed to join room. Please try again.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -43,7 +164,7 @@ const HomePage: React.FC = () => {
         <div className="text-center">
           <h1 className="text-4xl font-bold text-gray-900 dark:text-white">Meetboard by Prodai</h1>
           <p className="mt-2 text-lg text-gray-600 dark:text-gray-400">Collaborate visually. Connect instantly.</p>
-          {currentUser && (
+          {currentUser ? (
             <div className="mt-4 flex items-center justify-center gap-2 p-3 bg-white/20 dark:bg-slate-800/20 rounded-lg">
               <User className="w-5 h-5" />
               <span className="font-medium">{currentUser.name}</span>
@@ -55,18 +176,37 @@ const HomePage: React.FC = () => {
                 <LogOut className="w-4 h-4" />
               </button>
             </div>
+          ) : (
+            <div className="mt-4">
+              <button
+                onClick={() => window.location.href = '/auth'}
+                className="px-4 py-2 font-semibold text-white bg-primary rounded-lg hover:bg-primary-hover focus:outline-none focus:ring-2 focus:ring-primary-hover focus:ring-offset-2"
+              >
+                Sign In
+              </button>
+            </div>
           )}
         </div>
         
         <div className="space-y-4">
           <motion.button
             onClick={handleCreateRoom}
-            className="w-full px-4 py-3 font-semibold text-white bg-primary rounded-lg shadow-md hover:bg-primary-hover focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-hover dark:focus:ring-offset-gray-800"
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            disabled={isLoading || !currentUser}
+            className={`w-full px-4 py-3 font-semibold text-white rounded-lg shadow-md focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 ${isLoading || !currentUser ? 'bg-primary/50 cursor-not-allowed' : 'bg-primary hover:bg-primary-hover focus:ring-primary-hover'}`}
+            whileHover={isLoading || !currentUser ? {} : { scale: 1.02 }}
+            whileTap={isLoading || !currentUser ? {} : { scale: 0.98 }}
           >
-            Create New Room
+            {isLoading ? 'Creating Room...' : !currentUser ? 'Sign In to Create Room' : 'Create New Room'}
           </motion.button>
+          {error && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-2 p-2 text-sm text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-900/20 rounded-md text-center"
+            >
+              {error}
+            </motion.div>
+          )}
 
           <div className="relative flex items-center justify-center">
             <div className="absolute inset-0 flex items-center">
@@ -85,11 +225,12 @@ const HomePage: React.FC = () => {
             />
             <motion.button
               type="submit"
-              className="w-full px-4 py-3 font-semibold text-white bg-secondary rounded-lg shadow-md hover:bg-secondary-hover focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-secondary-hover dark:focus:ring-offset-gray-800"
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
+              disabled={isLoading || !currentUser}
+              className={`w-full px-4 py-3 font-semibold text-white rounded-lg shadow-md focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 ${isLoading || !currentUser ? 'bg-secondary/50 cursor-not-allowed' : 'bg-secondary hover:bg-secondary-hover focus:ring-secondary-hover'}`}
+              whileHover={isLoading || !currentUser ? {} : { scale: 1.02 }}
+              whileTap={isLoading || !currentUser ? {} : { scale: 0.98 }}
             >
-              Join Room
+              {isLoading ? 'Joining Room...' : !currentUser ? 'Sign In to Join Room' : 'Join Room'}
             </motion.button>
           </form>
         </div>

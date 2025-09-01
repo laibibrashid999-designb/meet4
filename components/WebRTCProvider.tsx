@@ -53,6 +53,9 @@ const getPeerConnectionConfig = async (): Promise<RTCConfiguration> => {
 };
 
 export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId }) => {
+  const { state } = useContext(RoomContext);
+  const { currentUser, participants } = state;
+
   useEffect(() => {
     if (!currentUser) return;
     const currentPeerIds = new Set(participants.map(p => p.id));
@@ -69,9 +72,6 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       }
     });
   }, [participants, currentUser?.id]);
-
-  const { state } = useContext(RoomContext);
-  const { currentUser, participants } = state;
   
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);

@@ -152,34 +152,152 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
   // Get user's media stream and set up robust unmount cleanup
   useEffect(() => {
     const startMedia = async () => {
-      try {
-        const constraints = {
-          video: {
-            width: { ideal: 1280, max: 1920 },
-            height: { ideal: 720, max: 1080 },
-            frameRate: { ideal: 30, max: 60 }
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            sampleRate: 48000
+      const mobile = isMobile();
+      console.log(`[WebRTC] Starting media for ${mobile ? 'mobile' : 'desktop'} device`);
+      
+      // Define mobile-friendly constraints with fallbacks
+      const getConstraints = (attempt: number) => {
+        if (mobile) {
+          // Mobile constraints with progressive fallbacks
+          switch (attempt) {
+            case 0: // First attempt - moderate quality
+              return {
+                video: {
+                  width: { ideal: 640, max: 1280 },
+                  height: { ideal: 480, max: 720 },
+                  frameRate: { ideal: 15, max: 30 },
+                  facingMode: 'user'
+                },
+                audio: {
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  autoGainControl: true
+                }
+              };
+            case 1: // Second attempt - lower quality
+              return {
+                video: {
+                  width: { ideal: 480, max: 640 },
+                  height: { ideal: 360, max: 480 },
+                  frameRate: { ideal: 15, max: 24 }
+                },
+                audio: {
+                  echoCancellation: true,
+                  noiseSuppression: true
+                }
+              };
+            case 2: // Third attempt - basic quality
+              return {
+                video: {
+                  width: { ideal: 320, max: 480 },
+                  height: { ideal: 240, max: 360 },
+                  frameRate: { ideal: 10, max: 15 }
+                },
+                audio: true
+              };
+            default: // Final attempt - audio only
+              return {
+                video: false,
+                audio: true
+              };
           }
-        };
-        
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        localStreamRef.current = stream;
-        isStreamReady.current = true;
-        stream.getAudioTracks()[0].enabled = !isMuted;
-        stream.getVideoTracks()[0].enabled = isCameraOn;
-        setLocalStream(stream);
+        } else {
+          // Desktop constraints with fallbacks
+          switch (attempt) {
+            case 0: // First attempt - high quality
+              return {
+                video: {
+                  width: { ideal: 1280, max: 1920 },
+                  height: { ideal: 720, max: 1080 },
+                  frameRate: { ideal: 30, max: 60 }
+                },
+                audio: {
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  autoGainControl: true,
+                  sampleRate: 48000
+                }
+              };
+            case 1: // Second attempt - medium quality
+              return {
+                video: {
+                  width: { ideal: 640, max: 1280 },
+                  height: { ideal: 480, max: 720 },
+                  frameRate: { ideal: 24, max: 30 }
+                },
+                audio: {
+                  echoCancellation: true,
+                  noiseSuppression: true,
+                  autoGainControl: true
+                }
+              };
+            case 2: // Third attempt - basic quality
+              return {
+                video: {
+                  width: { ideal: 480, max: 640 },
+                  height: { ideal: 360, max: 480 },
+                  frameRate: { ideal: 15, max: 24 }
+                },
+                audio: true
+              };
+            default: // Final attempt - audio only
+              return {
+                video: false,
+                audio: true
+              };
+          }
+        }
+      };
 
-        // Now that the stream is ready, process any queued signals
-        signalQueue.current.forEach(signalPayload => handleSignal(signalPayload));
-        signalQueue.current = []; // Clear the queue
+      // Try getUserMedia with progressive fallbacks
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          const constraints = getConstraints(attempt);
+          console.log(`[WebRTC] Attempt ${attempt + 1} with constraints:`, constraints);
+          
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          
+          // Log successful stream info
+          const videoTracks = stream.getVideoTracks();
+          const audioTracks = stream.getAudioTracks();
+          console.log(`[WebRTC] Success! Video tracks: ${videoTracks.length}, Audio tracks: ${audioTracks.length}`);
+          
+          if (videoTracks.length > 0) {
+            const settings = videoTracks[0].getSettings();
+            console.log(`[WebRTC] Video settings:`, settings);
+          }
+          
+          localStreamRef.current = stream;
+          isStreamReady.current = true;
+          
+          // Set initial track states
+          if (audioTracks.length > 0) {
+            audioTracks[0].enabled = !isMuted;
+          }
+          if (videoTracks.length > 0) {
+            videoTracks[0].enabled = isCameraOn;
+          }
+          
+          setLocalStream(stream);
 
-      } catch (error) {
-        console.error("Error accessing media devices.", error);
+          // Now that the stream is ready, process any queued signals
+          signalQueue.current.forEach(signalPayload => handleSignal(signalPayload));
+          signalQueue.current = []; // Clear the queue
+          
+          return; // Success, exit the retry loop
+          
+        } catch (error) {
+          console.error(`[WebRTC] Attempt ${attempt + 1} failed:`, error);
+          
+          if (attempt === 3) {
+            // All attempts failed
+            console.error('[WebRTC] All getUserMedia attempts failed. User may need to grant permissions or check device availability.');
+            // Still set isStreamReady to process queued signals even without media
+            isStreamReady.current = true;
+            signalQueue.current.forEach(signalPayload => handleSignal(signalPayload));
+            signalQueue.current = [];
+          }
+        }
       }
     };
     startMedia();
@@ -263,47 +381,98 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
   }, [currentUser?.id, roomId]);
 
   const createPeerConnection = async (peerId: string): Promise<RTCPeerConnection> => {
-    const config = await getPeerConnectionConfig();
-    const pc = new RTCPeerConnection(config);
-    
-    console.log(`[WebRTC] Creating peer connection for ${peerId} with config:`, {
-      iceServers: config.iceServers?.map(server => ({ urls: server.urls })),
-      iceTransportPolicy: config.iceTransportPolicy
-    });
-    
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        console.log(`[WebRTC] Sending ICE candidate to ${peerId}:`, event.candidate.type);
-        sendSignal(peerId, 'ice-candidate', { candidate: event.candidate });
-      }
-    };
+    try {
+      const config = await getPeerConnectionConfig();
+      const pc = new RTCPeerConnection(config);
+      
+      console.log(`[WebRTC] Creating peer connection for ${peerId} with config:`, {
+        iceServers: config.iceServers?.map(server => ({ urls: server.urls })),
+        iceTransportPolicy: config.iceTransportPolicy
+      });
+      
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          console.log(`[WebRTC] Sending ICE candidate to ${peerId}:`, event.candidate.type);
+          sendSignal(peerId, 'ice-candidate', { candidate: event.candidate });
+        } else {
+          console.log(`[WebRTC] ICE gathering complete for ${peerId}`);
+        }
+      };
 
-    pc.ontrack = (event) => {
-      console.log(`[WebRTC] Received track from ${peerId}:`, event.track.kind);
-      setPeerStreams(prev => new Map(prev).set(peerId, event.streams[0]));
-    };
-    
-    pc.oniceconnectionstatechange = () => {
-      console.log(`[WebRTC] ICE connection state for ${peerId}:`, pc.iceConnectionState);
-      if (pc.iceConnectionState === 'failed') {
-        console.log(`[WebRTC] Connection failed for ${peerId}, signaling for reconnection`);
-        sendSignal(peerId, 'connection-failed', {});
-      }
-    };
-    
-    pc.onconnectionstatechange = () => {
-      console.log(`[WebRTC] Connection state for ${peerId}:`, pc.connectionState);
-      if (pc.connectionState === 'connected') {
-        // Reset connection attempts on successful connection
-        connectionAttempts.current.set(peerId, 0);
-      }
-    };
+      pc.ontrack = (event) => {
+        console.log(`[WebRTC] Received track from ${peerId}:`, event.track.kind, 'readyState:', event.track.readyState);
+        if (event.streams && event.streams[0]) {
+          setPeerStreams(prev => new Map(prev).set(peerId, event.streams[0]));
+        } else {
+          console.warn(`[WebRTC] No streams received with track from ${peerId}`);
+        }
+      };
+      
+      pc.oniceconnectionstatechange = () => {
+        console.log(`[WebRTC] ICE connection state for ${peerId}:`, pc.iceConnectionState);
+        
+        switch (pc.iceConnectionState) {
+          case 'failed':
+          case 'disconnected':
+            console.log(`[WebRTC] Connection ${pc.iceConnectionState} for ${peerId}, attempting reconnection`);
+            // Add a small delay before reconnection to avoid rapid retries
+            setTimeout(() => {
+              if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+                sendSignal(peerId, 'connection-failed', {});
+              }
+            }, 2000);
+            break;
+          case 'connected':
+          case 'completed':
+            console.log(`[WebRTC] Successfully connected to ${peerId}`);
+            connectionAttempts.current.set(peerId, 0);
+            break;
+        }
+      };
+      
+      pc.onconnectionstatechange = () => {
+        console.log(`[WebRTC] Connection state for ${peerId}:`, pc.connectionState);
+        
+        if (pc.connectionState === 'connected') {
+          // Reset connection attempts on successful connection
+          connectionAttempts.current.set(peerId, 0);
+        } else if (pc.connectionState === 'failed') {
+          console.log(`[WebRTC] Peer connection failed for ${peerId}`);
+          // Remove failed connection from streams
+          setPeerStreams(prev => {
+            const newStreams = new Map(prev);
+            newStreams.delete(peerId);
+            return newStreams;
+          });
+        }
+      };
 
-    // Use the ref, which is guaranteed to be available because of the queueing logic
-    localStreamRef.current?.getTracks().forEach(track => pc.addTrack(track, localStreamRef.current!));
+      // Add error handling for the peer connection
+      pc.onerror = (error) => {
+        console.error(`[WebRTC] Peer connection error for ${peerId}:`, error);
+      };
 
-    peerConnections.current.set(peerId, pc);
-    return pc;
+      // Add local stream tracks if available
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => {
+          try {
+            pc.addTrack(track, localStreamRef.current!);
+            console.log(`[WebRTC] Added ${track.kind} track to peer connection for ${peerId}`);
+          } catch (error) {
+            console.error(`[WebRTC] Error adding track to peer connection for ${peerId}:`, error);
+          }
+        });
+      } else {
+        console.warn(`[WebRTC] No local stream available when creating peer connection for ${peerId}`);
+      }
+
+      peerConnections.current.set(peerId, pc);
+      return pc;
+      
+    } catch (error) {
+      console.error(`[WebRTC] Error creating peer connection for ${peerId}:`, error);
+      throw error;
+    }
   };
 
   useEffect(() => {
@@ -356,7 +525,12 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       if (audioTrack) {
         audioTrack.enabled = !audioTrack.enabled;
         setIsMuted(!audioTrack.enabled);
+        console.log(`[WebRTC] Audio ${audioTrack.enabled ? 'unmuted' : 'muted'}`);
+      } else {
+        console.warn('[WebRTC] No audio track available to toggle');
       }
+    } else {
+      console.warn('[WebRTC] No local stream available to toggle audio');
     }
   };
 
@@ -366,7 +540,14 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       if (videoTrack) {
         videoTrack.enabled = !videoTrack.enabled;
         setIsCameraOn(videoTrack.enabled);
+        console.log(`[WebRTC] Video ${videoTrack.enabled ? 'enabled' : 'disabled'}`);
+      } else {
+        console.warn('[WebRTC] No video track available to toggle (may be audio-only mode)');
+        // In audio-only mode, we still update the state for UI consistency
+        setIsCameraOn(!isCameraOn);
       }
+    } else {
+      console.warn('[WebRTC] No local stream available to toggle video');
     }
   };
 

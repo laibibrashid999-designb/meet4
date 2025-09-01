@@ -22,18 +22,50 @@ const VideoGrid: React.FC = () => {
     allStreams.set(peerId, stream);
   });
   
+  console.log(`[VideoGrid] 📊 Stream mapping:`, {
+    localStreamExists: !!localStream,
+    peerStreamsCount: peerStreams.size,
+    peerStreamIds: Array.from(peerStreams.keys()),
+    allStreamsCount: allStreams.size,
+    allStreamIds: Array.from(allStreams.keys())
+  });
+  
   const admittedParticipants = participants.filter(p => p.status === 'admitted');
+  console.log(`[VideoGrid] 👥 Admitted participants:`, admittedParticipants.map(p => ({ id: p.id, name: p.name })));
+  
   const participantStreams = admittedParticipants
-    .map(p => ({
+    .map(p => {
+      const stream = allStreams.get(p.id);
+      const participant = {
         id: p.id,
         name: p.name,
         avatarUrl: p.avatarUrl,
-        stream: allStreams.get(p.id),
+        stream: stream,
         isLocal: p.id === currentUser.id,
         isMuted: p.id === currentUser.id ? isLocalMuted : false, // In a real app, peer mute state would be synced
         isCameraOn: p.id === currentUser.id ? isLocalCameraOn : true, // In a real app, peer camera state would be synced
-    }))
-    .filter(p => p.stream);
+      };
+      
+      console.log(`[VideoGrid] 🎬 Participant ${p.name} (${p.id}):`, {
+        hasStream: !!stream,
+        streamId: stream?.id,
+        isLocal: participant.isLocal
+      });
+      
+      return participant;
+    });
+    
+  const participantsWithStreams = participantStreams.filter(p => p.stream);
+  const participantsWithoutStreams = participantStreams.filter(p => !p.stream);
+  
+  console.log(`[VideoGrid] 📺 Stream filtering results:`, {
+    totalParticipants: participantStreams.length,
+    withStreams: participantsWithStreams.length,
+    withoutStreams: participantsWithoutStreams.length,
+    participantsWithoutStreams: participantsWithoutStreams.map(p => ({ id: p.id, name: p.name }))
+  });
+  
+  const finalParticipantStreams = participantsWithStreams;
 
   const handleVideoStreamClick = (id: string) => {
     setFocusedStreamId(prevId => (prevId === id ? null : id));
@@ -42,7 +74,7 @@ const VideoGrid: React.FC = () => {
   if (isBoardVisible) {
     return (
       <motion.div layout className="fixed top-16 left-0 right-0 z-20 h-[100px] p-2 flex items-center gap-2 overflow-x-auto md:grid md:h-auto md:w-48 md:top-20 md:left-2 md:right-auto md:overflow-x-visible md:p-2">
-        {participantStreams.map(p => (
+        {finalParticipantStreams.map(p => (
            <motion.div layout="position" key={p.id} className="h-full aspect-video flex-shrink-0 md:w-full md:h-auto md:aspect-auto">
               <VideoStream 
                   stream={p.stream!}
@@ -59,8 +91,8 @@ const VideoGrid: React.FC = () => {
     );
   }
 
-  const focusedParticipant = focusedStreamId ? participantStreams.find(p => p.id === focusedStreamId) : null;
-  const thumbnailParticipants = focusedStreamId ? participantStreams.filter(p => p.id !== focusedStreamId) : participantStreams;
+  const focusedParticipant = focusedStreamId ? finalParticipantStreams.find(p => p.id === focusedStreamId) : null;
+  const thumbnailParticipants = focusedStreamId ? finalParticipantStreams.filter(p => p.id !== focusedStreamId) : finalParticipantStreams;
 
   if (focusedParticipant) {
      return (

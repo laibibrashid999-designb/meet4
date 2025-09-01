@@ -110,9 +110,14 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
   };
 
   const handleSignal = async ({ sender_id, signal_type, payload }: { sender_id: string, signal_type: string, payload: any }) => {
+    console.log(`[WebRTC] 🔄 Processing signal from ${sender_id}: ${signal_type}`);
+    console.log(`[WebRTC] 📊 Current connections:`, Array.from(peerConnections.current.keys()));
+    console.log(`[WebRTC] 📺 Current streams:`, Array.from(peerStreams.keys()));
+    
     let pc = peerConnections.current.get(sender_id);
     
     if (signal_type === 'offer') {
+      console.log(`[WebRTC] 📥 Processing offer from ${sender_id}`);
       // FIX: Improved glare handling. Do not create a new PeerConnection if one already exists.
       // This prevents destroying a connection that is already in the process of negotiating, which would result in no audio/video.
       if (!pc) {
@@ -129,19 +134,27 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       }
 
       await pc.setRemoteDescription(new RTCSessionDescription({type: 'offer', sdp: payload.sdp}));
+      console.log(`[WebRTC] ✅ Set remote description for ${sender_id}`);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      console.log(`[WebRTC] 📤 Sending answer to ${sender_id}`);
       sendSignal(sender_id, 'answer', { sdp: answer.sdp });
     } else if (signal_type === 'answer' && pc) {
+      console.log(`[WebRTC] 📥 Processing answer from ${sender_id}`);
       await pc.setRemoteDescription(new RTCSessionDescription({type: 'answer', sdp: payload.sdp}));
+      console.log(`[WebRTC] ✅ Set remote description (answer) for ${sender_id}`);
     } else if (signal_type === 'ice-candidate' && pc) {
+      console.log(`[WebRTC] 🧊 Processing ICE candidate from ${sender_id}:`, payload.candidate.type);
       try {
         // FIX: Add candidate only if remoteDescription is set, to avoid errors during connection setup.
         if (pc.remoteDescription) {
             await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+            console.log(`[WebRTC] ✅ Added ICE candidate from ${sender_id}`);
+        } else {
+            console.warn(`[WebRTC] ⚠️ Cannot add ICE candidate from ${sender_id}: no remote description`);
         }
       } catch (e) {
-        console.error('Error adding received ice candidate', e);
+        console.error(`[WebRTC] ❌ Error adding ICE candidate from ${sender_id}:`, e);
       }
     } else if (signal_type === 'connection-failed' && pc) {
       console.log(`[WebRTC] Received connection failed signal from ${sender_id}, attempting reconnection`);
@@ -153,10 +166,13 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
   useEffect(() => {
     const startMedia = async () => {
       const mobile = isMobile();
+      console.log(`[WebRTC] 📱 Device detected: ${mobile ? 'Mobile' : 'Desktop'}`);
+      console.log(`[WebRTC] 🌐 User Agent:`, navigator.userAgent);
       console.log(`[WebRTC] Starting media for ${mobile ? 'mobile' : 'desktop'} device`);
       
       // Define mobile-friendly constraints with fallbacks
       const getConstraints = (attempt: number) => {
+        console.log(`[WebRTC] 📋 Getting constraints for ${mobile ? 'mobile' : 'desktop'} attempt ${attempt + 1}`);
         if (mobile) {
           // Mobile constraints with progressive fallbacks
           switch (attempt) {
@@ -253,14 +269,21 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       for (let attempt = 0; attempt < 4; attempt++) {
         try {
           const constraints = getConstraints(attempt);
-          console.log(`[WebRTC] Attempt ${attempt + 1} with constraints:`, constraints);
+          console.log(`[WebRTC] 🎯 Attempt ${attempt + 1} with constraints:`, constraints);
           
           const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          console.log(`[WebRTC] ✅ ${mobile ? 'Mobile' : 'Desktop'} stream created successfully!`);
           
           // Log successful stream info
           const videoTracks = stream.getVideoTracks();
           const audioTracks = stream.getAudioTracks();
-          console.log(`[WebRTC] Success! Video tracks: ${videoTracks.length}, Audio tracks: ${audioTracks.length}`);
+          console.log(`[WebRTC] 📺 Stream details:`, {
+            id: stream.id,
+            videoTracks: videoTracks.length,
+            audioTracks: audioTracks.length,
+            active: stream.active,
+            deviceType: mobile ? 'mobile' : 'desktop'
+          });
           
           if (videoTracks.length > 0) {
             const settings = videoTracks[0].getSettings();
@@ -278,9 +301,11 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
             videoTracks[0].enabled = isCameraOn;
           }
           
+          console.log(`[WebRTC] 🎬 Setting local stream for ${mobile ? 'mobile' : 'desktop'} device`);
           setLocalStream(stream);
 
           // Now that the stream is ready, process any queued signals
+          console.log(`[WebRTC] 📤 Processing ${signalQueue.current.length} queued signals`);
           signalQueue.current.forEach(signalPayload => handleSignal(signalPayload));
           signalQueue.current = []; // Clear the queue
           
@@ -400,11 +425,32 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       };
 
       pc.ontrack = (event) => {
-        console.log(`[WebRTC] Received track from ${peerId}:`, event.track.kind, 'readyState:', event.track.readyState);
+        console.log(`[WebRTC] 📺 Received ${event.track.kind} track from ${peerId}`);
+        console.log(`[WebRTC] 📺 Track details:`, {
+          id: event.track.id,
+          kind: event.track.kind,
+          readyState: event.track.readyState,
+          enabled: event.track.enabled,
+          muted: event.track.muted
+        });
+        
         if (event.streams && event.streams[0]) {
-          setPeerStreams(prev => new Map(prev).set(peerId, event.streams[0]));
+          const stream = event.streams[0];
+          console.log(`[WebRTC] 🎬 Adding stream for ${peerId}:`, {
+            streamId: stream.id,
+            videoTracks: stream.getVideoTracks().length,
+            audioTracks: stream.getAudioTracks().length,
+            active: stream.active
+          });
+          
+          setPeerStreams(prev => {
+            const newStreams = new Map(prev);
+            newStreams.set(peerId, stream);
+            console.log(`[WebRTC] 📊 Updated peer streams:`, Array.from(newStreams.keys()));
+            return newStreams;
+          });
         } else {
-          console.warn(`[WebRTC] No streams received with track from ${peerId}`);
+          console.warn(`[WebRTC] ⚠️ No streams received with track from ${peerId}`);
         }
       };
       

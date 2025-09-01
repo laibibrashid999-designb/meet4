@@ -18,6 +18,7 @@ interface VideoStreamProps {
 const VideoStream: React.FC<VideoStreamProps> = ({ stream, isMuted, isCameraOn, isLocal, name, avatarUrl, onClick }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [volume, setVolume] = useState(1); // 1 is 100%
+  const [isStreamActive, setIsStreamActive] = useState(false);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -25,6 +26,20 @@ const VideoStream: React.FC<VideoStreamProps> = ({ stream, isMuted, isCameraOn, 
       if (!isLocal) {
         videoRef.current.volume = volume;
       }
+      
+      // Monitor stream activity
+      const checkStreamActivity = () => {
+        const videoTracks = stream.getVideoTracks();
+        const audioTracks = stream.getAudioTracks();
+        const hasActiveVideo = videoTracks.some(track => track.readyState === 'live');
+        const hasActiveAudio = audioTracks.some(track => track.readyState === 'live');
+        setIsStreamActive(hasActiveVideo || hasActiveAudio);
+      };
+      
+      checkStreamActivity();
+      const interval = setInterval(checkStreamActivity, 1000);
+      
+      return () => clearInterval(interval);
     }
   }, [stream, volume, isLocal]);
 
@@ -41,16 +56,27 @@ const VideoStream: React.FC<VideoStreamProps> = ({ stream, isMuted, isCameraOn, 
 
   return (
     <div 
-        className={`relative group w-full h-full bg-slate-800 dark:bg-slate-700 rounded-lg overflow-hidden shadow-lg border-2 transition-colors cursor-pointer ${isMuted ? 'border-red-500' : 'border-transparent'}`}
+        className={`relative group w-full h-full bg-slate-800 dark:bg-slate-700 rounded-lg overflow-hidden shadow-lg border-2 transition-colors cursor-pointer ${isMuted ? 'border-red-500' : isStreamActive ? 'border-green-500/50' : 'border-transparent'}`}
         onClick={onClick}
     >
-      <video ref={videoRef} autoPlay playsInline muted={isLocal} className={`w-full h-full object-cover transition-opacity duration-300 ${isCameraOn ? 'opacity-100' : 'opacity-0'}`} />
+      <video 
+        ref={videoRef} 
+        autoPlay 
+        playsInline 
+        muted={isLocal}
+        className={`w-full h-full object-cover transition-opacity duration-300 ${isCameraOn && isStreamActive ? 'opacity-100' : 'opacity-0'}`}
+      />
       
-      {!isCameraOn && (
+      {(!isCameraOn || !isStreamActive) && (
         <div className="absolute inset-0 flex items-center justify-center bg-slate-800 dark:bg-slate-700">
            <div className="w-16 h-16 text-2xl">
                 <Avatar name={name} avatarUrl={avatarUrl} />
            </div>
+           {!isStreamActive && !isLocal && (
+             <div className="absolute bottom-2 left-2 px-2 py-1 bg-yellow-500/80 text-white text-xs rounded">
+               Connecting...
+             </div>
+           )}
         </div>
       )}
 
@@ -80,6 +106,12 @@ const VideoStream: React.FC<VideoStreamProps> = ({ stream, isMuted, isCameraOn, 
        {isMuted && (
         <div className="absolute top-2 right-2 p-1.5 bg-black/50 rounded-full">
             <MicOff className="w-4 h-4 text-white" />
+        </div>
+      )}
+      
+      {!isLocal && !isStreamActive && (
+        <div className="absolute top-2 left-2 p-1.5 bg-yellow-500/80 rounded-full">
+          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
         </div>
       )}
     </div>

@@ -4,6 +4,7 @@ import React, { createContext, useState, useEffect, ReactNode, useContext, useRe
 import { RoomContext } from './RoomProvider';
 import { supabase } from '../lib/supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
+import { turnCredentialManager } from '../lib/turnCredentials';
 
 // The shape of the context
 interface WebRTCContextType {
@@ -32,26 +33,24 @@ interface WebRTCProviderProps {
   roomId: string;
 }
 
-// Configuration for STUN and TURN servers using credentials from user guide
-// FIX: Replaced the incorrect, long-lived API keys with the correct, short-lived example credentials.
-// This resolves TURN server authentication failures, enabling robust connectivity for clients on restrictive networks like mobile.
-const peerConnectionConfig = {
-  iceServers: [
-    {
-      urls: [
-        "stun:stun.cloudflare.com:3478",
-        "turn:turn.cloudflare.com:3478?transport=udp",
-        "turn:turn.cloudflare.com:3478?transport=tcp",
-        "turn:turn.cloudflare.com:80?transport=tcp",
-        "turns:turn.cloudflare.com:5349?transport=tcp",
-        "turns:turn.cloudflare.com:443?transport=tcp"
-      ],
-      username: "bc91b63e2b5d759f8eb9f3b58062439e0a0e15893d76317d833265ad08d6631099ce7c7087caabb31ad3e1c386424e3e",
-      credential: "ebd71f1d3edbc2b0edae3cd5a6d82284aeb5c3b8fdaa9b8e3bf9cec683e0d45fe9f5b44e5145db3300f06c250a15b4a0"
-    },
-  ],
+// Detect if user is on mobile for enhanced TURN usage
+const isMobile = () => {
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+         (navigator.maxTouchPoints && navigator.maxTouchPoints > 2);
 };
 
+// Get peer connection configuration with fresh TURN credentials
+const getPeerConnectionConfig = async (): Promise<RTCConfiguration> => {
+  const iceServers = await turnCredentialManager.getICEServers();
+  
+  return {
+    iceServers,
+    iceCandidatePoolSize: 10,
+    iceTransportPolicy: isMobile() ? 'relay' : 'all', // Force TURN on mobile
+    bundlePolicy: 'max-bundle',
+    rtcpMuxPolicy: 'require'
+  };
+};
 
 export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId }) => {
   const { state } = useContext(RoomContext);
@@ -68,6 +67,7 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
 
   const signalQueue = useRef<any[]>([]);
   const isStreamReady = useRef(false);
+  const connectionAttempts = useRef<Map<string, number>>(new Map());
 
   const leaveRoom = async () => {
     if (localStreamRef.current) {
@@ -104,6 +104,9 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
             console.warn('Error removing signaling channel', e);
         }
     }
+    
+    // Reset connection attempts
+    connectionAttempts.current.clear();
   };
 
   const handleSignal = async ({ sender_id, signal_type, payload }: { sender_id: string, signal_type: string, payload: any }) => {
@@ -113,7 +116,7 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       // FIX: Improved glare handling. Do not create a new PeerConnection if one already exists.
       // This prevents destroying a connection that is already in the process of negotiating, which would result in no audio/video.
       if (!pc) {
-        pc = createPeerConnection(sender_id);
+        pc = await createPeerConnection(sender_id);
       } else {
         console.warn(`[WebRTC] Received offer, but a connection already exists for ${sender_id}. State: ${pc.signalingState}`);
         // Simple glare resolution: The peer with the smaller ID is the initiator and their offer takes precedence.
@@ -140,6 +143,9 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       } catch (e) {
         console.error('Error adding received ice candidate', e);
       }
+    } else if (signal_type === 'connection-failed' && pc) {
+      console.log(`[WebRTC] Received connection failed signal from ${sender_id}, attempting reconnection`);
+      await attemptReconnection(sender_id);
     }
   };
   
@@ -147,7 +153,21 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
   useEffect(() => {
     const startMedia = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        const constraints = {
+          video: {
+            width: { ideal: 1280, max: 1920 },
+            height: { ideal: 720, max: 1080 },
+            frameRate: { ideal: 30, max: 60 }
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            sampleRate: 48000
+          }
+        };
+        
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
         localStreamRef.current = stream;
         isStreamReady.current = true;
         stream.getAudioTracks()[0].enabled = !isMuted;
@@ -180,6 +200,30 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
     };
   }, []); // This effect should only run once on mount
 
+  const attemptReconnection = async (peerId: string) => {
+    const attempts = connectionAttempts.current.get(peerId) || 0;
+    if (attempts >= 3) {
+      console.log(`[WebRTC] Max reconnection attempts reached for ${peerId}`);
+      return;
+    }
+    
+    connectionAttempts.current.set(peerId, attempts + 1);
+    
+    // Close existing connection
+    const existingPc = peerConnections.current.get(peerId);
+    if (existingPc) {
+      existingPc.close();
+      peerConnections.current.delete(peerId);
+    }
+    
+    // Create new connection and initiate offer
+    if (currentUser!.id < peerId) {
+      const pc = await createPeerConnection(peerId);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sendSignal(peerId, 'offer', { sdp: offer.sdp });
+    }
+  };
   const sendSignal = async (receiver_id: string, signal_type: string, payload: any) => {
     if (!currentUser || !channelRef.current) return;
     await channelRef.current.send({
@@ -218,17 +262,41 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
     };
   }, [currentUser?.id, roomId]);
 
-  const createPeerConnection = (peerId: string): RTCPeerConnection => {
-    const pc = new RTCPeerConnection(peerConnectionConfig);
+  const createPeerConnection = async (peerId: string): Promise<RTCPeerConnection> => {
+    const config = await getPeerConnectionConfig();
+    const pc = new RTCPeerConnection(config);
+    
+    console.log(`[WebRTC] Creating peer connection for ${peerId} with config:`, {
+      iceServers: config.iceServers?.map(server => ({ urls: server.urls })),
+      iceTransportPolicy: config.iceTransportPolicy
+    });
     
     pc.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log(`[WebRTC] Sending ICE candidate to ${peerId}:`, event.candidate.type);
         sendSignal(peerId, 'ice-candidate', { candidate: event.candidate });
       }
     };
 
     pc.ontrack = (event) => {
+      console.log(`[WebRTC] Received track from ${peerId}:`, event.track.kind);
       setPeerStreams(prev => new Map(prev).set(peerId, event.streams[0]));
+    };
+    
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC] ICE connection state for ${peerId}:`, pc.iceConnectionState);
+      if (pc.iceConnectionState === 'failed') {
+        console.log(`[WebRTC] Connection failed for ${peerId}, signaling for reconnection`);
+        sendSignal(peerId, 'connection-failed', {});
+      }
+    };
+    
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC] Connection state for ${peerId}:`, pc.connectionState);
+      if (pc.connectionState === 'connected') {
+        // Reset connection attempts on successful connection
+        connectionAttempts.current.set(peerId, 0);
+      }
     };
 
     // Use the ref, which is guaranteed to be available because of the queueing logic
@@ -248,10 +316,21 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       if (!peerConnections.current.has(p.id)) {
         // Simple "politeness" check to avoid both peers creating an offer at the same time (glare)
         if (currentUser.id < p.id) {
-            const pc = createPeerConnection(p.id);
-            pc.createOffer()
-                .then(offer => pc.setLocalDescription(offer))
-                .then(() => sendSignal(p.id, 'offer', { sdp: pc.localDescription?.sdp }));
+            createPeerConnection(p.id).then(pc => {
+              return pc.createOffer();
+            }).then(offer => {
+              const pc = peerConnections.current.get(p.id);
+              if (pc) {
+                return pc.setLocalDescription(offer);
+              }
+            }).then(() => {
+              const pc = peerConnections.current.get(p.id);
+              if (pc && pc.localDescription) {
+                sendSignal(p.id, 'offer', { sdp: pc.localDescription.sdp });
+              }
+            }).catch(error => {
+              console.error(`[WebRTC] Error creating offer for ${p.id}:`, error);
+            });
         }
       }
     });
@@ -273,15 +352,21 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
 
   const toggleMute = () => {
     if (localStream) {
-      localStream.getAudioTracks()[0].enabled = !localStream.getAudioTracks()[0].enabled;
-      setIsMuted(!localStream.getAudioTracks()[0].enabled);
+      const audioTrack = localStream.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled;
+        setIsMuted(!audioTrack.enabled);
+      }
     }
   };
 
   const toggleCamera = () => {
     if (localStream) {
-      localStream.getVideoTracks()[0].enabled = !localStream.getVideoTracks()[0].enabled;
-      setIsCameraOn(localStream.getVideoTracks()[0].enabled);
+      const videoTrack = localStream.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.enabled = !videoTrack.enabled;
+        setIsCameraOn(videoTrack.enabled);
+      }
     }
   };
 

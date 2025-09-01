@@ -285,7 +285,7 @@ export const RoomProvider: React.FC<RoomProviderProps> = ({ children, roomId }) 
         .on('postgres_changes', { event: '*', schema: 'public', table: 'meetboard_participants', filter: `room_id=eq.${roomId}` }, async (payload) => {
           if (!mounted || stateRef.current.isExiting) return;
           
-          console.debug('participants realtime event', payload);
+          console.log('[RoomProvider] Participants realtime event:', payload.eventType, payload.new || payload.old);
           switch (payload.eventType) {
             case 'INSERT':
             case 'UPDATE': {
@@ -319,10 +319,12 @@ export const RoomProvider: React.FC<RoomProviderProps> = ({ children, roomId }) 
         })
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'meetboard_whiteboard_events', filter: `room_id=eq.${roomId}` }, (payload) => {
           if (!mounted || payload.new.user_id === stateRef.current.currentUser?.id || stateRef.current.isExiting) return;
+          console.log('[RoomProvider] Whiteboard event:', payload.new.event_type);
           dispatch({ type: payload.new.event_type, payload: payload.new.data });
         })
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'meetboard_messages', filter: `room_id=eq.${roomId}` }, async (payload) => {
           if (!mounted || payload.new.user_id === stateRef.current.currentUser?.id || stateRef.current.isExiting) return;
+          console.log('[RoomProvider] New message from:', payload.new.user_id);
           const { data: user } = await supabase.from('profiles').select('full_name, avatar_url').eq('id', payload.new.user_id).single();
           dispatch({ type: 'SEND_MESSAGE', payload: { id: payload.new.id.toString(), userId: payload.new.user_id, userName: user?.full_name || 'Unknown', avatarUrl: user?.avatar_url, content: payload.new.content, timestamp: payload.new.created_at } });
         })
@@ -330,6 +332,8 @@ export const RoomProvider: React.FC<RoomProviderProps> = ({ children, roomId }) 
           if (status !== 'SUBSCRIBED' || !mounted) {
             return;
           }
+          
+          console.log('[RoomProvider] Realtime channel subscribed successfully');
 
           const { data: roomDataArray } = await supabase.from('meetboard_rooms').select('id, host_id').eq('id', roomId);
           const roomData = roomDataArray && roomDataArray.length > 0 ? roomDataArray[0] : null;
@@ -441,6 +445,7 @@ export const RoomProvider: React.FC<RoomProviderProps> = ({ children, roomId }) 
         });
     };
 
+    console.log('[RoomProvider] Initializing room for user:', state.currentUser?.id);
     initializeAndSubscribe().catch(err => {
         console.error('Initialization error:', err);
         if(mounted) dispatch({ type: 'SET_LOADING', payload: false });
@@ -479,6 +484,8 @@ export const RoomProvider: React.FC<RoomProviderProps> = ({ children, roomId }) 
   const dispatchAndBroadcast: Dispatch<RoomAction> = async (action) => {
     dispatch(action);
     if (!stateRef.current.currentUser) return;
+    if (stateRef.current.isExiting) return; // Don't broadcast if we're leaving
+    
     const { id: user_id } = stateRef.current.currentUser;
     try {
       switch (action.type) {

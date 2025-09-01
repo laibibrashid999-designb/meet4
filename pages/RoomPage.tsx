@@ -69,7 +69,7 @@ const RoomPageContent: React.FC = () => {
   };
 
   const handleConfirmAndGoHome = async () => {
-    console.log('[RoomPage] Going home - starting cleanup');
+    console.log('[RoomPage] Going home - starting cleanup sequence');
     
     // Immediately start the leaving process
     dispatch({ type: 'START_LEAVING' });
@@ -77,29 +77,29 @@ const RoomPageContent: React.FC = () => {
     let forced = false;
     const timer = setTimeout(() => {
         forced = true;
-        console.log('[RoomPage] Force navigating home after timeout');
+        console.log('[RoomPage] Forced navigation home after 3s timeout');
         navigate('/', { replace: true });
     }, 3000);
 
     try { 
-      console.log('[RoomPage] Starting WebRTC cleanup');
+      console.log('[RoomPage] Starting WebRTC cleanup...');
       await Promise.race([leaveWebRTCRoom?.(), new Promise(res => setTimeout(res, 2500))]); 
-      console.log('[RoomPage] WebRTC cleanup completed');
+      console.log('[RoomPage] ✓ WebRTC cleanup completed');
     } catch (e) { 
       console.warn('[RoomPage] WebRTC cleanup error:', e);
     }
     
     try { 
-      console.log('[RoomPage] Starting Room cleanup');
+      console.log('[RoomPage] Starting Room cleanup...');
       await Promise.race([leaveRoom?.(), new Promise(res => setTimeout(res, 2500))]); 
-      console.log('[RoomPage] Room cleanup completed');
+      console.log('[RoomPage] ✓ Room cleanup completed');
     } catch (e) { 
       console.warn('[RoomPage] Room cleanup error:', e);
     }
 
     if (!forced) {
         clearTimeout(timer);
-        console.log('[RoomPage] Navigating home after successful cleanup');
+        console.log('[RoomPage] ✓ All cleanup completed, navigating home...');
         navigate('/', { replace: true });
     }
   };

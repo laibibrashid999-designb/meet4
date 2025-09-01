@@ -12,7 +12,7 @@ const MediaControls: React.FC = () => {
   const navigate = useNavigate();
   
   const handleLeaveRoom = async () => {
-    console.log('[MediaControls] Leave button clicked');
+    console.log('[MediaControls] Leave button clicked - starting cleanup sequence');
     
     // Immediately start the leaving process to prevent UI interactions
     dispatch({ type: 'START_LEAVING' });
@@ -20,29 +20,29 @@ const MediaControls: React.FC = () => {
     let forced = false;
     const timer = setTimeout(() => {
       forced = true;
-      console.log('[MediaControls] Force navigating after timeout');
+      console.log('[MediaControls] Forced navigation after 3s timeout');
       navigate('/leaving', { state: { message: "You have left the meeting." }, replace: true });
     }, 3000);
   
     try { 
-      console.log('[MediaControls] Starting WebRTC cleanup');
+      console.log('[MediaControls] Starting WebRTC cleanup...');
       await Promise.race([leaveRoomFromWebRTC?.(), new Promise(res => setTimeout(res, 2500))]); 
-      console.log('[MediaControls] WebRTC cleanup completed');
+      console.log('[MediaControls] ✓ WebRTC cleanup completed');
     } catch(e) {
       console.warn('[MediaControls] WebRTC cleanup error:', e);
     }
     
     try { 
-      console.log('[MediaControls] Starting Room cleanup');
+      console.log('[MediaControls] Starting Room cleanup...');
       await Promise.race([leaveRoom?.(), new Promise(res => setTimeout(res, 2500))]); 
-      console.log('[MediaControls] Room cleanup completed');
+      console.log('[MediaControls] ✓ Room cleanup completed');
     } catch(e) {
       console.warn('[MediaControls] Room cleanup error:', e);
     }
   
     if (!forced) {
       clearTimeout(timer);
-      console.log('[MediaControls] Navigating after successful cleanup');
+      console.log('[MediaControls] ✓ All cleanup completed, navigating...');
       navigate('/leaving', { state: { message: "You have left the meeting." }, replace: true });
     }
   };

@@ -255,10 +255,21 @@ const RoomPageContent: React.FC = () => {
 
 const RoomPage: React.FC = () => {
   const { roomId } = useParams<{ roomId: string }>();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!roomId) {
+      console.error('[RoomPage] No room ID provided');
+      navigate('/');
+      return;
+    }
+  }, [roomId, navigate]);
+
+  if (!roomId) return null;
 
   return (
-    <RoomProvider roomId={roomId || 'default-room'}>
-      <WebRTCProvider roomId={roomId || 'default-room'}>
+    <RoomProvider roomId={roomId}>
+      <WebRTCProvider roomId={roomId}>
         <RoomPageContent />
       </WebRTCProvider>
     </RoomProvider>

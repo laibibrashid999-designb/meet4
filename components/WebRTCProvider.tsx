@@ -182,6 +182,11 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
   // Get user's media stream and set up robust unmount cleanup
   useEffect(() => {
     const startMedia = async () => {
+      if (!currentUser?.id || !roomId) {
+        console.log('[WebRTC] Waiting for user and room initialization...');
+        return;
+      }
+
       const mobile = isMobile();
       console.log(`[WebRTC] 📱 Device detected: ${mobile ? 'Mobile' : 'Desktop'}`);
       console.log(`[WebRTC] 🌐 User Agent:`, navigator.userAgent);
@@ -358,7 +363,7 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       peerConnections.current.forEach(pc => pc.close());
       peerConnections.current.clear();
     };
-  }, []); // This effect should only run once on mount
+  }, [currentUser?.id, roomId]); // Re-run when user or room changes
 
   const attemptReconnection = async (peerId: string) => {
     const attempts = connectionAttempts.current.get(peerId) || 0;

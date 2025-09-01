@@ -242,6 +242,25 @@ export const RoomProvider: React.FC<RoomProviderProps> = ({ children, roomId }) 
       dispatch({ type: 'SET_LOADING', payload: true });
       const userId = state.currentUser!.id;
 
+      // Check if room exists and is active
+      const { data: roomData, error: roomError } = await supabase
+        .from('meetboard_rooms')
+        .select('status')
+        .eq('id', roomId)
+        .single();
+
+      if (roomError || !roomData) {
+        console.error('[RoomProvider] Room not found or error:', roomError);
+        if (mounted) navigate('/');
+        return;
+      }
+
+      if (roomData.status !== 'active') {
+        console.error('[RoomProvider] Room is not active:', roomData.status);
+        if (mounted) navigate('/');
+        return;
+      }
+
       // Check if room is full
       const { data: participantsData, error: countError } = await supabase
         .from('meetboard_participants')

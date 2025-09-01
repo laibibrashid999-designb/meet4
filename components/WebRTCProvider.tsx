@@ -85,6 +85,31 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
   const signalQueue = useRef<any[]>([]);
   const isStreamReady = useRef(false);
   const connectionAttempts = useRef<Map<string, number>>(new Map());
+  // Queue for outgoing signals until channel is ready
+  const isChannelReady = useRef(false);
+  const outgoingSignalQueue = useRef<{ receiver_id: string; signal_type: string; payload: any }[]>([]);
+  // Queue for incoming ICE candidates per peer until remoteDescription is set
+  const pendingIceCandidates = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
+
+  // Helper to flush pending ICE candidates once remoteDescription is set
+  const flushPendingIceCandidates = async (peerId: string, pc: RTCPeerConnection) => {
+    try {
+      const queued = pendingIceCandidates.current.get(peerId);
+      if (queued && pc.remoteDescription) {
+        console.log(`[WebRTC] 🧊 Flushing ${queued.length} queued ICE candidates for ${peerId}`);
+        for (const cand of queued) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(cand));
+          } catch (e) {
+            console.error(`[WebRTC] ❌ Error adding queued ICE candidate for ${peerId}:`, e);
+          }
+        }
+        pendingIceCandidates.current.delete(peerId);
+      }
+    } catch (e) {
+      console.error(`[WebRTC] ❌ Error flushing ICE candidates for ${peerId}:`, e);
+    }
+  };
 
   const leaveRoom = async () => {
     if (localStreamRef.current) {
@@ -152,6 +177,8 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
 
       await pc.setRemoteDescription(new RTCSessionDescription({type: 'offer', sdp: payload.sdp}));
       console.log(`[WebRTC] ✅ Set remote description for ${sender_id}`);
+      // Flush any queued ICE candidates now that remote description is set
+      await flushPendingIceCandidates(sender_id, pc);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       console.log(`[WebRTC] 📤 Sending answer to ${sender_id}`);
@@ -160,15 +187,32 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       console.log(`[WebRTC] 📥 Processing answer from ${sender_id}`);
       await pc.setRemoteDescription(new RTCSessionDescription({type: 'answer', sdp: payload.sdp}));
       console.log(`[WebRTC] ✅ Set remote description (answer) for ${sender_id}`);
-    } else if (signal_type === 'ice-candidate' && pc) {
-      console.log(`[WebRTC] 🧊 Processing ICE candidate from ${sender_id}:`, payload.candidate.type);
+      // Flush any queued ICE candidates now that remote description is set
+      await flushPendingIceCandidates(sender_id, pc);
+    } else if (signal_type === 'ice-candidate') {
+      // Always handle candidate messages, even if pc hasn't been created yet
+      const candidateInit: RTCIceCandidateInit | undefined = payload?.candidate;
+      if (!candidateInit) {
+        console.warn(`[WebRTC] ⚠️ ICE candidate payload missing from ${sender_id}`);
+        return;
+      }
+      if (!pc) {
+        console.warn(`[WebRTC] 🧊 No PeerConnection yet for ${sender_id}. Queueing ICE candidate.`);
+        const arr = pendingIceCandidates.current.get(sender_id) || [];
+        arr.push(candidateInit);
+        pendingIceCandidates.current.set(sender_id, arr);
+        return;
+      }
       try {
-        // FIX: Add candidate only if remoteDescription is set, to avoid errors during connection setup.
         if (pc.remoteDescription) {
-            await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
-            console.log(`[WebRTC] ✅ Added ICE candidate from ${sender_id}`);
+          await pc.addIceCandidate(new RTCIceCandidate(candidateInit));
+          console.log(`[WebRTC] ✅ Added ICE candidate from ${sender_id}`);
         } else {
-            console.warn(`[WebRTC] ⚠️ Cannot add ICE candidate from ${sender_id}: no remote description`);
+          // Queue until remote description is set
+          console.warn(`[WebRTC] 🧊 Remote description not set yet for ${sender_id}. Queueing ICE candidate.`);
+          const arr = pendingIceCandidates.current.get(sender_id) || [];
+          arr.push(candidateInit);
+          pendingIceCandidates.current.set(sender_id, arr);
         }
       } catch (e) {
         console.error(`[WebRTC] ❌ Error adding ICE candidate from ${sender_id}:`, e);
@@ -390,8 +434,14 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
     }
   };
   const sendSignal = async (receiver_id: string, signal_type: string, payload: any) => {
-    if (!currentUser || !channelRef.current) return;
-    await channelRef.current.send({
+    if (!currentUser) return;
+    const channel = channelRef.current;
+    if (!channel || !isChannelReady.current) {
+      console.warn('[WebRTC] ⏳ Channel not ready. Queueing outgoing signal:', signal_type);
+      outgoingSignalQueue.current.push({ receiver_id, signal_type, payload });
+      return;
+    }
+    await channel.send({
       type: 'broadcast',
       event: 'signal',
       payload: { sender_id: currentUser.id, receiver_id, signal_type, payload }
@@ -404,6 +454,7 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
     
     const channel = supabase.channel(`webrtc-${roomId}`);
     channelRef.current = channel;
+    isChannelReady.current = false;
 
     const handleBroadcast = ({ payload }: { payload: any }) => {
       if (payload.receiver_id === currentUser.id) {
@@ -417,13 +468,32 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
     };
 
     channel.on('broadcast', { event: 'signal' }, handleBroadcast);
-    channel.subscribe();
+
+    channel.subscribe((status: string) => {
+      if (status === 'SUBSCRIBED') {
+        console.log('[WebRTC] ✅ Signaling channel subscribed');
+        isChannelReady.current = true;
+        // Flush any queued outgoing signals
+        if (outgoingSignalQueue.current.length > 0) {
+          console.log(`[WebRTC] 📤 Flushing ${outgoingSignalQueue.current.length} queued outgoing signals`);
+          outgoingSignalQueue.current.forEach(({ receiver_id, signal_type, payload }) => {
+            channel.send({
+              type: 'broadcast',
+              event: 'signal',
+              payload: { sender_id: currentUser.id, receiver_id, signal_type, payload }
+            });
+          });
+          outgoingSignalQueue.current = [];
+        }
+      }
+    });
 
     return () => {
       if (channelRef.current) {
         supabase.removeChannel(channelRef.current);
         channelRef.current = null;
       }
+      isChannelReady.current = false;
     };
   }, [currentUser?.id, roomId]);
 
@@ -439,8 +509,17 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
       
       pc.onicecandidate = (event) => {
         if (event.candidate) {
-          console.log(`[WebRTC] Sending ICE candidate to ${peerId}:`, event.candidate.type);
-          sendSignal(peerId, 'ice-candidate', { candidate: event.candidate });
+          // FIX: Send plain JSON candidate instead of RTCIceCandidate object
+          const jsonCandidate = typeof event.candidate.toJSON === 'function'
+            ? event.candidate.toJSON()
+            : {
+                candidate: event.candidate.candidate,
+                sdpMid: event.candidate.sdpMid,
+                sdpMLineIndex: event.candidate.sdpMLineIndex,
+                usernameFragment: (event.candidate as any).usernameFragment,
+              };
+          console.log(`[WebRTC] Sending ICE candidate to ${peerId}:`, jsonCandidate.candidate);
+          sendSignal(peerId, 'ice-candidate', { candidate: jsonCandidate });
         } else {
           console.log(`[WebRTC] ICE gathering complete for ${peerId}`);
         }
@@ -522,14 +601,18 @@ export const WebRTCProvider: React.FC<WebRTCProviderProps> = ({ children, roomId
 
       // Add local stream tracks if available
       if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => {
-          try {
-            pc.addTrack(track, localStreamRef.current!);
-            console.log(`[WebRTC] Added ${track.kind} track to peer connection for ${peerId}`);
-          } catch (error) {
-            console.error(`[WebRTC] Error adding track to peer connection for ${peerId}:`, error);
-          }
-        });
+        try {
+          localStreamRef.current.getTracks().forEach(track => {
+            const sender = pc.addTrack(track, localStreamRef.current!);
+            console.log(`[WebRTC] Added ${track.kind} track to peer connection for ${peerId}`, {
+              trackId: track.id,
+              enabled: track.enabled,
+              sender: sender.track?.id
+            });
+          });
+        } catch (error) {
+          console.error(`[WebRTC] Error adding tracks to peer connection for ${peerId}:`, error);
+        }
       } else {
         console.warn(`[WebRTC] No local stream available when creating peer connection for ${peerId}`);
       }
